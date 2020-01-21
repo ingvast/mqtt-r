@@ -2,10 +2,10 @@ REBOL [
     title: {MQTT client}
 ]
 
-int-to-2byte-int: func [ val /local result ][
+int-to-2byte-int: func [ val [integer!] /local result ][
     result: copy #{0000}
-    result/1: shift val 8
-    result/2: val and 255
+    result/1: to-char shift val 8
+    result/2: to-char val and 255
     result
 ]
 
@@ -65,53 +65,6 @@ int-to-vb: func [
     return vb
 ]
     
-parse-msg: func [ data ][
-    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
-    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
-    string: [ int copy result result skip (print result ) ]
-    var-lengh-int: [
-	( mult: 1 result: 0)
-	any [
-	    copy v normal-var-int
-	    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 180 )
-	]
-	copy v skip ( v: to-integer to-char v result: v * mult + result )
-    ]
-    parse-dbg: [ p: ( print [ index? p ":" mold copy/part p 10] ) ]
-    print-flags: func [ bits][
-	flags: [
-	    "Reserved"
-	    "Clean start"
-	    "Will flag"
-	    "Willl QoS1"
-	    "Willl QoS2"
-	    "Will retain1"
-	    "Password flag"
-	    "User Name Flag"
-	]
-	repeat i 8 [
-	    if 0 != ( bits and shift/left 1 i - 1) [ print flags/:i ]
-	]
-    ]
-    parse/all data [
-	#{10}
-	var-lengh-int (len: result ? len )
-	string  ( mqtt-string: result )
-	copy version skip ( print [ "Version:" to-integer first version ] )
-	copy connect-flags skip  ( print-flags to-integer connect-flags/1 )
-	int ( keep-alive: result ? keep-alive )
-	; Property
-	; Only ver 5 var-lengh-int ( property-length: result ? property-length )
-	; Payload
-	parse-dbg
-	string (client-id: result ? client-id )
-	string (user: result ? user )
-	string (password: result ? password )
-	parse-dbg
-	to end
-    ]
-]
-
 msgs: make object! [
 
     protocol-level: 4
@@ -125,17 +78,28 @@ msgs: make object! [
 	      variable-name3 int 3 ; variable name will be set to int of three bits
 	    ]
 	 The variable names should be mapped to variables
+
+	As binary the information is Little Endian.
+	    Ex.  With the spec
+		[	a bool! 
+		    b uint 16
+		    c bool
+		]
+	    The information will be stored as
+		byte    1		    |  2
+		bits    0 1 2 3 4 5 6 7 | 0 1 2 3 4 5 6 7
+			a|b0          b6              bF|c
 	}
 	spec [block!]
-	/local result pos shift-in int-to-bits name len
+	/local bin pos shift-in int-to-bits name len result ok
     ][
-	result: 0
+	bin: 0
 	pos: 0
 	shift-in: func  [ n val ] [
 	    unless integer? val [
 		val: either val [ 1 ][ 0 ]
 	    ]
-	    result: result or shift/left val pos 
+	    bin: bin or shift/left val pos 
 	    pos: pos + n
 	]
 
@@ -148,6 +112,8 @@ msgs: make object! [
 	]
 	ok: parse spec [
 	    any [ (name: len: none )
+		[ none! | 'none! ] opt [set len integer!] ( shift-in any [ len 1] 0)
+		|
 		set name word! 
 		[ 
 		    'bool!  ( shift-in 1 get name )
@@ -155,20 +121,23 @@ msgs: make object! [
 		    'uint set len integer! ( shift-in len get name )
 		    |
 		    'int set len integer! ( shift-in len int-to-bits len get name )
-		    ;|
-		    ;copy val to end ( throw make error! reform [ "Not knwon argument in spec" val  ] )
 		]
-		|
-		    [ none! | 'none! ] p: (print [p] ) opt [set len integer!] ( shift-in any [ len 1] 0)
 	    ]
 	]
-	unless all [ ok pos == 8 ] [ throw make error! {Spec is ill formed} ]
+	unless ok [ throw make error! rejoin [ {Spec is ill formed at:} mold here ] ]
+	unless 0 = mod pos 8 [ throw make error! reform [{Spec is not a multiple of eight:} pos ] ]
 	
-	to-binary to-char result
+	result: copy #{}
+	while [ pos > 0 ] [
+	    append result to-char bin and 255
+	    bin: shift bin 8
+	    pos: pos - 8
+	]
+	result
     ]
 
     binary-to-spec: func [ 
-	{byte is an int which is casted to the bitfield described by spec.
+	{byte is an int or binary which is casted to the bitfield described by spec.
 	 the variables in spec are set.
 	 Spec describes the bits in byte.
 	 Starting from least significant bit
@@ -177,13 +146,25 @@ msgs: make object! [
 	      variable-name3 int 3 ; variable name will be set to int of three bits
 	    ]
 	 The variable names should be mapped to variables
+	As binary the information is Little Endian.
+	Ex.  With the spec
+	    [	a bool! 
+		b uint 16
+		c bool
+	    ]
+	The information will be stored as
+	    byte    1		    |  2
+	    bits    0 1 2 3 4 5 6 7 | 0 1 2 3 4 5 6 7
+		    a|b0          b6              bF|c
+						   
 	}
 	byte [integer! binary! ]
 	spec [block!]
 	/local
-	    shift-out int-ize name len 
+	    shift-out int-ize name len  ok here pos
     ][
 	shift-out: func [ n ] [
+	    pos: pos + n
 	    also 
 		byte and (( shift/left 1 n ) - 1)
 		byte: shift byte n
@@ -196,9 +177,14 @@ msgs: make object! [
 		x
 	    ]
 	]
-	byte: to-integer byte
-	parse spec [
-	    any [ 
+	if binary? byte [
+	    byte: byte/1 + (256 * ( (any [ byte/2 0]) + ( 256 * any [ byte/3 0 ] ) ))
+	]
+	pos: 0
+	ok: parse spec [
+	    any [  here:
+		[ 'none! | none!] opt [ set len integer! ] ( shift-out any [ len 1 ])
+		|
 		set name skip  
 		[ 
 		    'bool!  ( set name  1 = shift-out 1 )
@@ -206,10 +192,25 @@ msgs: make object! [
 		    'uint set len integer! ( set name shift-out len )
 		    |
 		    'int set len integer! ( set name int-ize shift-out len len )
+		]
+	    ]
+	]
+	unless 0 = mod pos 8 [ throw make error! reform [{Spec is not a multiple of eight:} pos ] ]
+	unless ok [ throw make error! rejoin [ {Spec is ill formed at:} mold here ] ]
+    ]
+
+    print-spec: func [ spec ][
+	parse spec [ 
+	    any [ (name: len: none )
+		[ none! | 'none! ]  opt integer! 
+		|
+		set name word!  (prin rejoin [ name ": " ] )
+		[ 
+		    'bool!  ( print get name )
 		    |
-		    none! opt set len integer! ( shift-out len )
+		    'uint integer! ( print get name )
 		    |
-		    copy val to end ( throw make error! reform [ "Not knwon argument in spec" val  ] )
+		    'int integer! ( print get name )
 		]
 	    ]
 	]
@@ -290,42 +291,83 @@ msgs: make object! [
 
 
     connect: make object! [
-	msg-proto: [
-	    #{10}
-	    length
-	    variable-header [
-		string "MQTT"
-		byte #{04}  ; version
-		bits [
-		    7 off
-		    6 off
-		    5 off
-		    4 off off
-		    2 off
-		    1 on
-		    0 off
-		]
-		uint16 10
+	connect-id: #{10}
+
+	msg: func [
+	    /local result
+	][
+	    result: variable-header
+	    append result payload
+	    insert result reduce [
+		connect-id
+		int-to-vb length? result
 	    ]
-	    payload [
-		client-id
-	    ]
+	    result
 	]
 	
-	vh: func [ ][
-	    string-to-lenstr "MQTT"
-	    to-char protocol-level
-	    binary-to-spec 
+	variable-header: func [
+	    /local result
+	][
+	    result: copy #{}
+	    append result string-to-lenstr "MQTT"
+	    append result to-char protocol-level
+	    append result spec-to-binary connect-flags-spec
+	    append result int-to-2byte-int keep-alive
+	    if protocol-level > 4 [
+		; SHould be all Connect Properties (3.1.2.11)
+		throw make error! {Protocol 5 is not yet implemented}
+	    ]
+	    result
 	]
-    
+
+	payload: func [
+	    /local result
+	][
+	    result: copy #{}
+	    append result string-to-lenstr client-id
+	    if will-flag [
+		throw make error! {Will properties are not implemented}
+		append result will-properties
+	    ]
+	    if username-flag [
+		append result string-to-lenstr username
+	    ]
+	    if password-flag [
+		append result string-to-lenstr password
+	    ]
+	    result
+	]
+
+	connect-flags-spec: [
+	    none!  ; Reserved
+	    clean-start-flag bool! 
+	    will-flag  bool!
+	    will-QoS-level uint 2
+	    will-retain-flag bool!
+	    password-flag bool!
+	    username-flag bool!
+	]
+
 	clean-start-flag: 
 	will-flag:
 	will-retain-flag:
-	password-flag:
-	username-flag: none
+	will-QoS-level: none
+	password-flag: true
+	username-flag: true
 	QoS-level: 0
+
+	keep-alive: 10
+
+	client-id: "mqtt-client-000"
 	
-	parse-msg: func [ data ][
+	password: "week"
+	username: "Johan"
+
+	
+	parse-msg: func [ data
+	    /local rest-parse
+	][
+	    parse-rest: copy []
 	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
 	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
 	    string: [ int copy result result skip (print result ) ]
@@ -338,38 +380,26 @@ msgs: make object! [
 		copy v skip ( v: to-integer to-char v result: v * mult + result )
 	    ]
 	    parse-dbg: [ p: ( print [ index? p ":" mold copy/part p 10] ) ]
-	    print-flags: func [ bits][
-		flags: [
-		    "Reserved"
-		    "Clean start"
-		    "Will flag"
-		    "Willl QoS.1"
-		    "Willl QoS.2"
-		    "Will retain"
-		    "Password flag"
-		    "User Name Flag"
-		]
-		repeat i 8 [
-		    if 0 != ( bits and shift/left 1 i - 1) [ print flags/:i ]
-		]
-	    ]
+
 	    
 	    parse/all data [
 		#{10} ; Connect message
 		var-lengh-int (len: result ? len )
 		string  ( mqtt-string: result )
 		copy version skip ( print [ "Version:" protocol-level: to-integer first version ] )
-		copy connect-flags skip  ( print-flags to-integer connect-flags/1 )
+		copy connect-flags skip  (
+			binary-to-spec to-binary connect-flags connect-flags-spec
+			print-spec connect-flags-spec
+			if username-flag [ append parse-rest [ string (username: result ? username) ] ]
+			if password-flag [ append parse-rest [ string (password: result ? password) ] ]
+		)
 		int ( keep-alive: result ? keep-alive )
 		; Property
 		; Only ver 5 var-lengh-int ( property-length: result ? property-length )
 		; Payload
-		parse-dbg
 		string (client-id: result ? client-id )
-		string (user: result ? user )
-		string (password: result ? password )
-		parse-dbg
-		to end
+		parse-rest
+		end
 	    ]
 	]
     ]
@@ -377,27 +407,5 @@ msgs: make object! [
 ]
 
 	    
-	    test-set-bits: func [
-		/local
-		bit0 bit1 u1 i1
-		spec val
-	    ][
-		spec: [
-		    bit0 bool!
-		    u1 uint 3
-		    bit1 bool!
-		    i1 int 3
-		]
-		val: ( shift/left 0 0 ) or
-		     ( shift/left 5 1 ) or
-		     ( shift/left 1 4 ) or
-		     ( shift/left 3 5 )
-		? val
-		binary-to-spec val spec
-		? bit0 ? bit1
-		? u1 ? i1
-	    ]
-
-
-
 		
+; vim: sts=4 sw=4 :
