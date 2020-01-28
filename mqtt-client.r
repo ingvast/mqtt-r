@@ -65,7 +65,7 @@ int-to-vb: func [
     return vb
 ]
     
-msgs: make object! [
+mqtt: make object! [
 
     protocol-level: 4
 
@@ -244,10 +244,10 @@ msgs: make object! [
 	/local
 	    value flags
     ][
-	set [ value flags ] select/part control-packet-spec name 2
+	set [ value flags ] select/skip control-packet-spec name 3
 	unless integer? flags [ throw make error! {Variable flag not implemented} ]
-	result: to-binary shift/left to-char value 4
-	result: result or flags
+	result: shift/left value 4
+	result: to-binary to-char result or flags
 	append result int-to-vb restLength
 	result
     ]
@@ -289,22 +289,45 @@ msgs: make object! [
 	]
     ]
 
-
-    connect: make object! [
-	connect-id: #{10}
+    default: make object! [
+	type-name: none
 
 	msg: func [
 	    /local result
 	][
 	    result: variable-header
 	    append result payload
-	    insert result reduce [
-		connect-id
-		int-to-vb length? result
-	    ]
+
+	    insert result fixed-header type-name length? result
 	    result
 	]
 	
+	variable-header: func [
+	    [catch]
+	    /local result
+	][
+	    throw  make error! reform [ type-name {is not implemented}]
+	]
+
+	payload: func [
+	    [catch]
+	    /local result
+	][
+	    throw  make error! reform [ type-name {is not implemented}]
+	]
+
+	parse-msg: func [
+	    [catch]
+	    data
+	    /local rest-parse
+	][
+	    throw  make error! reform [ type-name {is not implemented}]
+	]
+    ]
+
+    connect: make default [
+	type-name: 'connect
+
 	variable-header: func [
 	    /local result
 	][
@@ -348,7 +371,7 @@ msgs: make object! [
 	    username-flag bool!
 	]
 
-	clean-start-flag: 
+	clean-start-flag: true
 	will-flag:
 	will-retain-flag:
 	will-QoS-level: none
@@ -362,7 +385,6 @@ msgs: make object! [
 	
 	password: "week"
 	username: "Johan"
-
 	
 	parse-msg: func [ data
 	    /local rest-parse
@@ -403,9 +425,105 @@ msgs: make object! [
 	    ]
 	]
     ]
+    connack: make default [
 
+	session-present: none
+	connect-return-code: none
+
+	variable-header-spec: [
+	    none! 7
+	    session-present bool!
+	    connect-return-code uint 8
+	]
+	connect-return-codes-table: [
+	    0 "connection accepted"
+	    1 "connection refused unaccceptable protocol version"
+	    2 "Connection refused, identifier rejected"
+	    3 "Connection refused, Server unavailable"
+	    4 "Connection refused, bad user name or password (malformed)"
+	    5 "Connection refused, not authorized"
+	]
+
+	parse-msg: func [ data
+	    /local rest-parse
+	][
+	    parse-rest: copy []
+	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
+	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
+	    string: [ int copy result result skip (print result ) ]
+	    var-lengh-int: [
+		( mult: 1 result: 0)
+		any [
+		    copy v normal-var-int
+		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 180 )
+		]
+		copy v skip ( v: to-integer to-char v result: v * mult + result )
+	    ]
+	    parse-dbg: [ p: ( print [ index? p ":" mold copy/part p 10] ) ]
+
+	    
+	    id: first+ data
+	    print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
+	    parse/all data [
+		var-lengh-int (
+		    len: result print [ "Length:" len ] 
+		    unless len = 2 [
+			throw make error! {Wrong length of connack package}
+		    ]
+		)
+		
+		copy variable-header-data [2 skip] (
+
+		    binary-to-spec to-binary variable-header-data variable-header-spec 
+		    print [ "Session present:" session-present ]
+		    either connect-return-code = 0 [
+			print "Connection OK" 
+		    ][
+			print [ "Connect return code" connect-return-code connect-return-codes-table/:connect-return-code ]
+		    ]
+		)
+	    ]
+	]
+    ]
+    publish: make default [
+	topic: none
+	payload: #{}
+
+	dup-flag: false
+	QoS-level: 0
+	retain-flag: false
+	packet-identifier: none
+    ]
 ]
 
+connect: func [
+    url
+][
+    c: open/no-wait/binary url
+    
+    connect-message: make mqtt/connect [
+	username: none
+	password: none
+	username-flag: false 
+	password-flag: false
+    ]
+    insert c probe connect-message/msg
+    print "Connection request inserted"
+    wait c
+    print "Connack recieved?"
+    connect-acc: copy c
+    either connect-acc [
+	? connect-acc
+	connack-message: make mqtt/connack []
+	connack-message/parse-msg connect-acc
+	? connack-message
+    ][
+	print {Server disconnected, check connect parameters}
+	connect-message/parse-msg connect-message/msg
+    ]
+    close c
+]
+    
 	    
 		
 ; vim: sts=4 sw=4 :
