@@ -221,8 +221,10 @@ mqtt: make object! [
 	; name	    value   flags
 	reserved    0	0
 	connect	    1	0
-	connack	    2	[ dup bool!  QoS uint 2 retain bool! ]
-	publish	    3   0
+	connack	    2	0
+	publish	    3   [   dup-flag	    bool!
+			    QoS-level	    uint    2
+			    retain-flag	    bool!    ]
 	puback	    4	0
 	pubrec	    5	0
 	pubrel	    6	2
@@ -239,55 +241,27 @@ mqtt: make object! [
 
     fixed-header: func [
 	[catch]
-	name
+	name 
 	restLength
+	ctx
 	/local
-	    value flags
+	    value flags result
     ][
 	set [ value flags ] select/skip control-packet-spec name 3
-	unless integer? flags [ throw make error! {Variable flag not implemented} ]
-	result: shift/left value 4
-	result: to-binary to-char result or flags
+	either  block? flags [
+	    ;throw make error! {Variable flag not implemented} 
+	    result: bind/copy flags ctx
+	    append result [ value uint 4 ]
+	    result: spec-to-binary result
+	][
+	    result: shift/left value 4
+	    result: to-binary to-char result or flags
+	]
 	append result int-to-vb restLength
 	result
     ]
 
-    reserved-message-identifiers: []
 
-    new-message-identifier: func [/local result ][
-	until [ 
-	    not find reserved-message-identifiers result: -1 + random 2 ** 16
-	]
-	append new-message-identifier result
-	result
-    ]
-
-    delete-message-identifier: func [ [catch] id ][
-	remove find reserved-message-identifiers id 
-    ]
-
-    packet-identifier-need: use [ no yes some ][
-	no: [ false false false ]
-	yes: [ true true true ]
-	some: [ false true true ]
-	reduce [
-	    'connect	no
-	    'connack	no
-	    'publish	some
-	    'puback		yes
-	    'pubrec		yes
-	    'pubrel		yes
-	    'pubcomp	    yes
-	    'subscribe	    yes
-	    'suback		yes
-	    'unsubscribe		yes
-	    'unsuback	    yes
-	    'pingreq	no
-	    'pingresp	no
-	    'disconnect	no
-	    'auth	    no
-	]
-    ]
 
     default: make object! [
 	type-name: none
@@ -298,15 +272,64 @@ mqtt: make object! [
 	    result: variable-header
 	    append result payload
 
-	    insert result fixed-header type-name length? result
+	    insert result fixed-header type-name length? result self
 	    result
+	]
+
+        reserved-message-identifiers: []
+
+	new-message-identifier: func [ data /local result ][
+	    until [ 
+		not find/skip reserved-message-identifiers result: to-integer -1 + random 2 ** 16 2
+	    ]
+	    append reserved-message-identifiers reduce [ result data ]
+	    result
+	]
+
+	delete-message-identifier: func [ [catch] id ][
+	    remove/part find/skip reserved-message-identifiers id 2 2
+	]
+
+	packet-identifier-need: use [ no yes some ][
+	    no:	    reduce [ false false false ]
+	    yes:    reduce [ true true true ]
+	    some:   reduce [ false true true ]
+	    reduce  [
+		'connect	no
+		'connack	no
+		'publish	some
+		'puback		yes
+		'pubrec		yes
+		'pubrel		yes
+		'pubcomp	yes
+		'subscribe	yes
+		'suback		yes
+		'unsubscribe	yes
+		'unsuback	yes
+		'pingreq	no
+		'pingresp	no
+		'disconnect	no
+		'auth		no
+	    ]
+	]
+	
+	QoS-level: none
+	variable-header-start: func [
+	    /local  index
+	][
+	    index: 1 + any [ QoS-level 0 ] 
+	    either pick select packet-identifier-need type-name index [
+		int-to-2byte-int new-message-identifier self
+	    ][
+		copy #{}
+	    ]
 	]
 	
 	variable-header: func [
 	    [catch]
 	    /local result
 	][
-	    throw  make error! reform [ type-name {is not implemented}]
+	    variable-header-start
 	]
 
 	payload: func [
@@ -331,7 +354,7 @@ mqtt: make object! [
 	variable-header: func [
 	    /local result
 	][
-	    result: copy #{}
+	    result: variable-header-start
 	    append result string-to-lenstr "MQTT"
 	    append result to-char protocol-level
 	    append result spec-to-binary connect-flags-spec
@@ -381,7 +404,7 @@ mqtt: make object! [
 
 	keep-alive: 10
 
-	client-id: "mqtt-client-000"
+	client-id: does [ client-id: join "mqtt-client-" random 10'000 ]
 	
 	password: "week"
 	username: "Johan"
@@ -485,14 +508,178 @@ mqtt: make object! [
 	    ]
 	]
     ]
+
     publish: make default [
+	type-name: 'publish
 	topic: none
 	payload: #{}
 
 	dup-flag: false
 	QoS-level: 0
 	retain-flag: false
+	packet-identifier: false
+    
+	variable-header: func [
+	    /local result
+	][
+	    result: variable-header-start
+	    append result string-to-lenstr topic
+	    result
+	]
+
+	parse-msg: func [
+	    data
+	    /local rest-parse p
+	][
+	    parse-rest: copy []
+	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
+	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
+	    string: [ int copy result result skip (print result ) ]
+	    var-lengh-int: [
+		( mult: 1 result: 0)
+		any [
+		    copy v normal-var-int
+		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 180 )
+		]
+		copy v skip ( v: to-integer to-char v result: v * mult + result )
+	    ]
+	    parse-dbg: [ p: ( print [ index? p ":" mold copy/part p 10] ) ]
+
+	    
+	    id: first+ data
+	    print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
+	    parse/all data [ 
+		var-lengh-int (
+		    len: result print [ "Length:" len ] 
+		)
+		p: ( unless len = length? p [ throw make error! {The publish packet has wrong length} ] )
+		
+		string ( topic: to-string result )
+		(
+		    possible-packet-identifier:
+			either QoS-level > 0 [
+			    [ int ( packet-identifier: result ) ]
+			][
+			    []
+			]
+		)
+		possible-packet-identifier
+		copy payload to end ( payload: to-binary payload )
+	    ]
+	]
+    ]
+
+    puback: make default [
+	type-name: 'puback
+	; only if OoS-level > 0
+    ]
+
+    subscribe: make default [
+	type-name: 'subscribe
+
+	topics-qos: []
+	add-topic: func [ topic qos ][
+	    append topics-qos topic
+	    append topics-qos qos
+	]
+	variable-header: func [
+	    /local result 
+	][
+	    result: variable-header-start
+	]
+	payload: func[
+	    /local result
+		QoS 
+	][
+	    result: copy #{}
+	    foreach [t q] topics-qos  [
+		append result string-to-lenstr t
+		append result to-char q
+	    ]
+	    result
+	]
+	parse-msg: func [
+	    data
+	    /local rest-parse p
+	][
+	    parse-rest: copy []
+
+	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
+	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
+	    string: [ int copy result result skip (print result ) ]
+	    var-lengh-int: [
+		( mult: 1 result: 0)
+		any [
+		    copy v normal-var-int
+		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 180 )
+		]
+		copy v skip ( v: to-integer to-char v result: v * mult + result )
+	    ]
+	    parse-dbg: [ p: ( print [ index? p ":" mold copy/part p 10] ) ]
+
+	    id: first+ data
+	    
+	    print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
+	    unless type-name = pick control-packet-spec (3 * shift id 4) + 1 [
+		throw make error! reform [{Not a} type-name {subscribe message}]
+	    ]
+
+	    parse/all data [ 
+		var-lengh-int (
+		    len: result print [ "Length:" len ] 
+		)
+		p: ( unless len = length? p [ throw make error! {The publish packet has wrong length} ] )
+		
+		string ( topic: to-string result )
+		(
+		    possible-packet-identifier:
+			either QoS-level > 0 [
+			    [ int ( packet-identifier: result ) ]
+			][
+			    []
+			]
+		)
+		possible-packet-identifier
+		copy payload to end ( payload: to-binary payload )
+	    ]
+	]
+    ]
+
+    suback: make default [
+	type-name: 'suback
+	QoS-response: []
 	packet-identifier: none
+	parse-msg: func [
+	    data
+	    /local rest-parse p
+	][
+	    parse-rest: copy []
+
+	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
+
+	    id: first+ data
+	    
+	    print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
+	    unless type-name = pick control-packet-spec (3 * shift id 4) + 1 [
+		throw make error! reform [{Not a} type-name {subscribe message}]
+	    ]
+
+	    parse/all data [ 
+		var-lengh-int (
+		    len: result print [ "Length:" len ] 
+		)
+		p: ( unless len = length? p [ throw make error! {The publish packet has wrong length} ] )
+		
+		; Variable header
+		int ( packet-identifier: result )
+
+		; Payload
+		some [
+		    copy QoS skip ( append QoS-response to-integer QoS/1 )
+		]
+	    ]
+	]
+
     ]
 ]
 
@@ -507,19 +694,47 @@ connect: func [
 	username-flag: false 
 	password-flag: false
     ]
-    insert c probe connect-message/msg
+    insert c m: connect-message/msg
     print "Connection request inserted"
     wait c
-    print "Connack recieved?"
     connect-acc: copy c
     either connect-acc [
-	? connect-acc
 	connack-message: make mqtt/connack []
 	connack-message/parse-msg connect-acc
-	? connack-message
     ][
 	print {Server disconnected, check connect parameters}
 	connect-message/parse-msg connect-message/msg
+	halt
+    ]
+    
+    pub: make mqtt/publish [ topic: "/asdf" payload: "aaa" ]
+    sub: make mqtt/subscribe [ add-topic "/rebol" 0 ]
+    ? sub
+    insert c probe sub/msg
+    forever [
+	d: wait [ 0.3 c ]
+	switch d compose [
+	    (c) [
+		data: copy c
+		? data
+		unless data [
+		    print {Bye}
+		    break
+		]
+		id: first data
+		type-name: pick mqtt/control-packet-spec (3 * shift id 4) + 1
+		prin [ type-name ]
+		switch type-name [
+		    suback [
+			    sa: make mqtt/suback [ print parse-msg data ] 
+			]
+		]
+	    ]
+	    (none) [
+		pub/payload: to-binary now/precise
+		insert c dbg: pub/msg
+	    ]
+	]
     ]
     close c
 ]
