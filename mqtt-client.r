@@ -69,6 +69,8 @@ mqtt: make object! [
 
     protocol-level: 4
 
+    hline: does [ "****************************************************" ]
+
     spec-to-binary: func [ 
 	[catch]
 	{The variables in bitfield described by spec are casted to an int
@@ -261,14 +263,30 @@ mqtt: make object! [
 	result
     ]
 
+    reserved-message-identifiers: []
+
+    new-message-identifier: func [ data /local result ][
+	until [ 
+	    not find/skip reserved-message-identifiers result: to-integer -1 + random 2 ** 16 2
+	]
+	append reserved-message-identifiers reduce [ result data ]
+	result
+    ]
+    delete-message-identifier: func [ [catch] id ][
+	remove/part find/skip reserved-message-identifiers id 2 2
+    ]
+    delete-message-data: func [ id ][ select/skip reserved-message-identifiers id 2 ]
 
 
     default: make object! [
 	type-name: none
+	string: func [ /local result ] [
+	    result: reform [
+		type-name 
+	    ]   
+	]
 
-	msg: func [
-	    /local result
-	][
+	msg: func [ /local result ][
 	    result: variable-header
 	    append result payload
 
@@ -276,19 +294,6 @@ mqtt: make object! [
 	    result
 	]
 
-        reserved-message-identifiers: []
-
-	new-message-identifier: func [ data /local result ][
-	    until [ 
-		not find/skip reserved-message-identifiers result: to-integer -1 + random 2 ** 16 2
-	    ]
-	    append reserved-message-identifiers reduce [ result data ]
-	    result
-	]
-
-	delete-message-identifier: func [ [catch] id ][
-	    remove/part find/skip reserved-message-identifiers id 2 2
-	]
 
 	packet-identifier-need: use [ no yes some ][
 	    no:	    reduce [ false false false ]
@@ -314,12 +319,13 @@ mqtt: make object! [
 	]
 	
 	QoS-level: none
+	packet-identifier: none
 	variable-header-start: func [
 	    /local  index
 	][
 	    index: 1 + any [ QoS-level 0 ] 
 	    either pick select packet-identifier-need type-name index [
-		int-to-2byte-int new-message-identifier self
+		int-to-2byte-int packet-identifier: new-message-identifier self
 	    ][
 		copy #{}
 	    ]
@@ -350,6 +356,15 @@ mqtt: make object! [
 
     connect: make default [
 	type-name: 'connect
+
+	string: func [ /local result ] [
+	    result: reform [
+		type-name  tab client-id tab QoS-level newline
+		{Protocol level:} tab protocol-level newline
+		{user:} tab username {password:} tab password
+	    
+	    ]   
+	]
 
 	variable-header: func [
 	    /local result
@@ -411,11 +426,12 @@ mqtt: make object! [
 	
 	parse-msg: func [ data
 	    /local rest-parse
+		int string
 	][
 	    parse-rest: copy []
 	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
 	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
-	    string: [ int copy result result skip (print result ) ]
+	    string: [ int copy result result skip  ]
 	    var-lengh-int: [
 		( mult: 1 result: 0)
 		any [
@@ -435,8 +451,8 @@ mqtt: make object! [
 		copy connect-flags skip  (
 			binary-to-spec to-binary connect-flags connect-flags-spec
 			print-spec connect-flags-spec
-			if username-flag [ append parse-rest [ string (username: result ? username) ] ]
-			if password-flag [ append parse-rest [ string (password: result ? password) ] ]
+			if username-flag [ append parse-rest [ string (username: result ) ] ]
+			if password-flag [ append parse-rest [ string (password: result ) ] ]
 		)
 		int ( keep-alive: result ? keep-alive )
 		; Property
@@ -449,15 +465,27 @@ mqtt: make object! [
 	]
     ]
     connack: make default [
+	type-name: 'connack
 
 	session-present: none
 	connect-return-code: none
+
+	string: func [ /local result ] [
+	    result: reform [
+		type-name
+	    ]   
+	    append result reform [ newline
+		select connect-return-codes-table any [ connect-return-code no-connect ]
+		]
+	    result
+	]
 
 	variable-header-spec: [
 	    none! 7
 	    session-present bool!
 	    connect-return-code uint 8
 	]
+
 	connect-return-codes-table: [
 	    0 "connection accepted"
 	    1 "connection refused unaccceptable protocol version"
@@ -465,10 +493,13 @@ mqtt: make object! [
 	    3 "Connection refused, Server unavailable"
 	    4 "Connection refused, bad user name or password (malformed)"
 	    5 "Connection refused, not authorized"
+	    
+	    no-connect "Connect return code not set"
 	]
 
 	parse-msg: func [ data
 	    /local rest-parse
+		int string len
 	][
 	    parse-rest: copy []
 	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
@@ -486,24 +517,17 @@ mqtt: make object! [
 
 	    
 	    id: first+ data
-	    print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
+	    ;print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
 	    parse/all data [
 		var-lengh-int (
-		    len: result print [ "Length:" len ] 
+		    len: result 
 		    unless len = 2 [
 			throw make error! {Wrong length of connack package}
 		    ]
 		)
 		
 		copy variable-header-data [2 skip] (
-
 		    binary-to-spec to-binary variable-header-data variable-header-spec 
-		    print [ "Session present:" session-present ]
-		    either connect-return-code = 0 [
-			print "Connection OK" 
-		    ][
-			print [ "Connect return code" connect-return-code connect-return-codes-table/:connect-return-code ]
-		    ]
 		)
 	    ]
 	]
@@ -511,6 +535,18 @@ mqtt: make object! [
 
     publish: make default [
 	type-name: 'publish
+
+	string: func [ /result ][
+	    result: reform [
+		type-name  QoS-level tab
+		{Retain: } retain-flag newline
+		{Topic:} topic newline
+		{Payload:} payload tab
+		"(" mold to-string payload ")"
+	    ]
+	    result
+	]
+
 	topic: none
 	payload: #{}
 
@@ -530,11 +566,12 @@ mqtt: make object! [
 	parse-msg: func [
 	    data
 	    /local rest-parse p
+		int string
 	][
 	    parse-rest: copy []
 	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
 	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
-	    string: [ int copy result result skip (print result ) ]
+	    string: [ int copy result result skip ]
 	    var-lengh-int: [
 		( mult: 1 result: 0)
 		any [
@@ -547,11 +584,8 @@ mqtt: make object! [
 
 	    
 	    id: first+ data
-	    print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
 	    parse/all data [ 
-		var-lengh-int (
-		    len: result print [ "Length:" len ] 
-		)
+		var-lengh-int ( len: result )
 		p: ( unless len = length? p [ throw make error! {The publish packet has wrong length} ] )
 		
 		string ( topic: to-string result )
@@ -577,20 +611,26 @@ mqtt: make object! [
     subscribe: make default [
 	type-name: 'subscribe
 
+	string: func [ /local result ][
+	    result: reform [
+		type-name tab  packet-identifier
+		newline
+		mold new-line/skip topics-qos on 2
+	    ]
+	]
+
 	topics-qos: []
+
 	add-topic: func [ topic qos ][
 	    append topics-qos topic
 	    append topics-qos qos
 	]
-	variable-header: func [
-	    /local result 
-	][
+
+	variable-header: func [ /local result ][
 	    result: variable-header-start
 	]
-	payload: func[
-	    /local result
-		QoS 
-	][
+
+	payload: func[ /local result QoS ][
 	    result: copy #{}
 	    foreach [t q] topics-qos  [
 		append result string-to-lenstr t
@@ -598,9 +638,10 @@ mqtt: make object! [
 	    ]
 	    result
 	]
+
 	parse-msg: func [
 	    data
-	    /local rest-parse p
+	    /local rest-parse p int string
 	][
 	    parse-rest: copy []
 
@@ -619,14 +660,14 @@ mqtt: make object! [
 
 	    id: first+ data
 	    
-	    print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
+	    ;print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
 	    unless type-name = pick control-packet-spec (3 * shift id 4) + 1 [
 		throw make error! reform [{Not a} type-name {subscribe message}]
 	    ]
 
 	    parse/all data [ 
 		var-lengh-int (
-		    len: result print [ "Length:" len ] 
+		    len: result 
 		)
 		p: ( unless len = length? p [ throw make error! {The publish packet has wrong length} ] )
 		
@@ -647,11 +688,21 @@ mqtt: make object! [
 
     suback: make default [
 	type-name: 'suback
+
+	string: func [ /local result ][
+	    result: reform [
+		type-name  packet-identifier
+		newline
+		mold QoS-response
+	    ]
+	]
+
 	QoS-response: []
 	packet-identifier: none
 	parse-msg: func [
 	    data
 	    /local rest-parse p
+		int string
 	][
 	    parse-rest: copy []
 
@@ -659,15 +710,13 @@ mqtt: make object! [
 
 	    id: first+ data
 	    
-	    print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
+	    ;print [ "Msg type" pick control-packet-spec (3 * shift id 4) + 1 ]
 	    unless type-name = pick control-packet-spec (3 * shift id 4) + 1 [
 		throw make error! reform [{Not a} type-name {subscribe message}]
 	    ]
 
 	    parse/all data [ 
-		var-lengh-int (
-		    len: result print [ "Length:" len ] 
-		)
+		var-lengh-int ( len: result )
 		p: ( unless len = length? p [ throw make error! {The publish packet has wrong length} ] )
 		
 		; Variable header
@@ -678,6 +727,7 @@ mqtt: make object! [
 		    copy QoS skip ( append QoS-response to-integer QoS/1 )
 		]
 	    ]
+	    delete-message-identifier packet-identifier
 	]
 
     ]
@@ -701,6 +751,8 @@ connect: func [
     either connect-acc [
 	connack-message: make mqtt/connack []
 	connack-message/parse-msg connect-acc
+	print mqtt/hline
+	print connack-message/string
     ][
 	print {Server disconnected, check connect parameters}
 	connect-message/parse-msg connect-message/msg
@@ -709,8 +761,9 @@ connect: func [
     
     pub: make mqtt/publish [ topic: "/asdf" payload: "aaa" ]
     sub: make mqtt/subscribe [ add-topic "/rebol" 0 ]
-    ? sub
-    insert c probe sub/msg
+    insert c sub/msg
+    print mqtt/hline
+    print sub/string
     forever [
 	d: wait [ 0.3 c ]
 	switch d compose [
@@ -723,12 +776,9 @@ connect: func [
 		]
 		id: first data
 		type-name: pick mqtt/control-packet-spec (3 * shift id 4) + 1
-		prin [ type-name ]
-		switch type-name [
-		    suback [
-			    sa: make mqtt/suback [ print parse-msg data ] 
-			]
-		]
+		p: make mqtt/:type-name [ parse-msg data ]
+		print mqtt/hline
+		print p/string
 	    ]
 	    (none) [
 		pub/payload: to-binary now/precise
@@ -738,7 +788,5 @@ connect: func [
     ]
     close c
 ]
-    
-	    
 		
 ; vim: sts=4 sw=4 :
