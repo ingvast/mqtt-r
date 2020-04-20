@@ -1,5 +1,13 @@
 REBOL [
     title: {MQTT client}
+    doc: {
+	Using:
+	    >> m: open-mqtt/custom tcp://the-mqtt-server.com [ QoS-level: 0 ]
+	    A object for mqtt-communication is returned.
+	    It will be connected to the server. If failure, none is returned.
+	    >> m/subscribe "/post/1" :print
+    }
+    author: "Johan Ingvast"
 ]
 
 int-to-2byte-int: func [ val [integer!] /local result ][
@@ -429,14 +437,14 @@ mqtt: make object! [
 		int string
 	][
 	    parse-rest: copy []
-	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
+	    normal-var-int: charset [ #"^(80)" - #"^(ff)" ]
 	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
 	    string: [ int copy result result skip  ]
 	    var-lengh-int: [
 		( mult: 1 result: 0)
 		any [
 		    copy v normal-var-int
-		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 180 )
+		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 128 )
 		]
 		copy v skip ( v: to-integer to-char v result: v * mult + result )
 	    ]
@@ -445,7 +453,7 @@ mqtt: make object! [
 	    
 	    parse/all data [
 		#{10} ; Connect message
-		var-lengh-int (len: result ? len )
+		var-lengh-int (len: result )
 		string  ( mqtt-string: result )
 		copy version skip ( print [ "Version:" protocol-level: to-integer first version ] )
 		copy connect-flags skip  (
@@ -464,6 +472,7 @@ mqtt: make object! [
 	    ]
 	]
     ]
+
     connack: make default [
 	type-name: 'connack
 
@@ -502,14 +511,14 @@ mqtt: make object! [
 		int string len
 	][
 	    parse-rest: copy []
-	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
+	    normal-var-int: charset [ #"^(80)" - #"^(ff)" ]
 	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
 	    string: [ int copy result result skip (print result ) ]
 	    var-lengh-int: [
 		( mult: 1 result: 0)
 		any [
 		    copy v normal-var-int
-		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 180 )
+		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 128 )
 		]
 		copy v skip ( v: to-integer to-char v result: v * mult + result )
 	    ]
@@ -541,7 +550,7 @@ mqtt: make object! [
 		type-name  QoS-level tab
 		{Retain: } retain-flag newline
 		{Topic:} topic newline
-		{Payload:} payload tab
+		{Payload: (} length? payload {)} payload tab
 		"(" mold to-string payload ")"
 	    ]
 	    result
@@ -566,17 +575,17 @@ mqtt: make object! [
 	parse-msg: func [
 	    data
 	    /local rest-parse p
-		int string
+		int string result  v
 	][
 	    parse-rest: copy []
-	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
 	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
-	    string: [ int copy result result skip ]
+	    string: [ int  copy result result skip ]
+	    normal-var-int: charset [ #"^(80)" - #"^(ff)" ]
 	    var-lengh-int: [
 		( mult: 1 result: 0)
 		any [
 		    copy v normal-var-int
-		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 180 )
+		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 128 )
 		]
 		copy v skip ( v: to-integer to-char v result: v * mult + result )
 	    ]
@@ -585,8 +594,11 @@ mqtt: make object! [
 	    
 	    id: first+ data
 	    parse/all data [ 
-		var-lengh-int ( len: result )
-		p: ( unless len = length? p [ throw make error! {The publish packet has wrong length} ] )
+		var-lengh-int ( len: result  )
+		p: ( unless len = length? p [
+		    throw make error! probe reform [ 
+			{The publish packet has wrong length. Found } length? p { should be } len]
+		] )
 		
 		string ( topic: to-string result )
 		(
@@ -645,14 +657,14 @@ mqtt: make object! [
 	][
 	    parse-rest: copy []
 
-	    normal-var-int: charset [ #"^(90)" - #"^(ff)" ]
 	    int: [ copy v 2 skip ( result: (256 * first v) + second v ) ]
 	    string: [ int copy result result skip (print result ) ]
+	    normal-var-int: charset [ #"^(80)" - #"^(ff)" ]
 	    var-lengh-int: [
 		( mult: 1 result: 0)
 		any [
 		    copy v normal-var-int
-		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 180 )
+		    (v: to-integer to-char v result: (v and 127) * mult + result mult: mult * 128 )
 		]
 		copy v skip ( v: to-integer to-char v result: v * mult + result )
 	    ]
@@ -769,10 +781,9 @@ connect: func [
 	switch d compose [
 	    (c) [
 		data: copy c
-		? data
 		unless data [
 		    print {Bye}
-		    break
+		    break ;; forever
 		]
 		id: first data
 		type-name: pick mqtt/control-packet-spec (3 * shift id 4) + 1
