@@ -303,6 +303,7 @@ mqtt: make object! [
 	]
 
 
+;TODO: Structure should be moved up one level.
 	packet-identifier-need: use [ no yes some ][
 	    no:	    reduce [ false false false ]
 	    yes:    reduce [ true true true ]
@@ -344,6 +345,27 @@ mqtt: make object! [
 	    /local result
 	][
 	    variable-header-start
+	]
+
+	respond: func [
+	    /local repsond-messages 
+	][
+	    respond-messages: reduce [ ; message and responsetype depending on QoS
+		'connect	[connack]
+		'connack	[]
+		'publish	[puback pubrec ]
+		'puback		[]
+		'pubrec		[pubrel]
+		'pubrel		[pubcomp]
+		'pubcomp	[]
+		'subscribe	[suback]
+		'suback		[]
+		'unsubscribe	[unsuback]
+		'unsuback	[]
+		'pingreq	[pingresp]
+		'pingresp	[]
+		'disconnect	[]
+		'auth		[]
 	]
 
 	payload: func [
@@ -772,12 +794,12 @@ connect: func [
     ]
     
     pub: make mqtt/publish [ topic: "/asdf" payload: "aaa" ]
-    sub: make mqtt/subscribe [ add-topic "/rebol" 0 ]
+    sub: make mqtt/subscribe [ add-topic "/rebol/#" 0 ]
     insert c sub/msg
     print mqtt/hline
     print sub/string
     forever [
-	d: wait [ 0.3 c ]
+	d: wait [ 2.0 c ]
 	switch d compose [
 	    (c) [
 		data: copy c
@@ -791,7 +813,7 @@ connect: func [
 		print mqtt/hline
 		print p/string
 	    ]
-	    (none) [
+	    (none) [ ; timeout
 		pub/payload: to-binary now/precise
 		insert c dbg: pub/msg
 	    ]
@@ -799,5 +821,6 @@ connect: func [
     ]
     close c
 ]
+halt
 		
 ; vim: sts=4 sw=4 :
