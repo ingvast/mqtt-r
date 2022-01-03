@@ -366,6 +366,7 @@ mqtt: make object! [
 		'pingresp	[]
 		'disconnect	[]
 		'auth		[]
+	    ]
 	]
 
 	payload: func [
@@ -768,15 +769,19 @@ mqtt: make object! [
 ]
 
 connect: func [
-    url
+    address [ url! port! ]
 ][
-    c: open/no-wait/binary url
+    either port? address [
+	c: address
+    ] [
+	c: open/no-wait/binary url
+    ]
     
     connect-message: make mqtt/connect [
-	username: none
-	password: none
-	username-flag: false 
-	password-flag: false
+	username: "johan"
+	password: "saby"
+	username-flag: true 
+	password-flag: true
     ]
     insert c m: connect-message/msg
     print "Connection request inserted"
@@ -792,7 +797,10 @@ connect: func [
 	connect-message/parse-msg connect-message/msg
 	halt
     ]
+    c
+]
     
+cont: func [] [
     pub: make mqtt/publish [ topic: "/asdf" payload: "aaa" ]
     sub: make mqtt/subscribe [ add-topic "/rebol/#" 0 ]
     insert c sub/msg
@@ -821,6 +829,5 @@ connect: func [
     ]
     close c
 ]
-halt
 		
 ; vim: sts=4 sw=4 :
